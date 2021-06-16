@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -11,6 +12,14 @@ import (
 	"time"
 
 	bpf "github.com/iovisor/gobpf/bcc"
+)
+
+/* command line arguments */
+var (
+	help        bool
+	silent      bool
+	duration    int
+	connections int
 )
 
 const pingPort = "65532"
@@ -89,18 +98,22 @@ func loadKporbe(m *bpf.Module, name string) {
 	}
 }
 
-func usage() {
-	fmt.Printf("Usage: %v <ip>\n", os.Args[0])
-	fmt.Printf("e.g.: %v 172.217.194.106\n", os.Args[0])
-	os.Exit(1)
-}
-
 func main() {
-	if len(os.Args) != 2 {
-		usage()
+	cmdLineInit()
+
+	if len(os.Args) < 2 {
+		flag.Usage()
+		return
 	}
 
-	ip := os.Args[1]
+	host := os.Args[1]
+
+	flag.Parse()
+
+	if help || host == "" {
+		flag.Usage()
+		return
+	}
 
 	m := bpf.NewModule(source, []string{
 		"-w",
@@ -120,11 +133,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("Runing ping program, hit CTRL+C to stop")
+	fmt.Println("Runing ping program, hit Ctrl + C to stop and count the results")
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, os.Kill)
 
+	var timeList []float64
 	go func() {
 		var event pingEventType
 		for {
@@ -134,25 +148,56 @@ func main() {
 				fmt.Printf("failed to decode received data: %s\n", err)
 				continue
 			}
-			fmt.Printf("tcp RST from %s: time=%.3f ms\n", ip, float64(event.DeltaUs)/1000.0)
+
+			deltaMs := float64(event.DeltaUs) / 1000.0
+			timeList = append(timeList, deltaMs)
+
+			if !silent {
+				fmt.Printf("tcp RST from %s: time=%.3f ms\n", host, deltaMs)
+			}
 		}
 	}()
 
-	go func() {
-		for {
-			_, err := net.Dial("tcp", ip+":"+pingPort)
-			if err != nil {
-				errStr := err.Error()
-				if !strings.Contains(errStr, "connection refused") {
-					fmt.Println("net.Dial error: " + errStr)
-					sig <- os.Interrupt
+	for i := 0; i < connections; i++ {
+		go func() {
+			for {
+				_, err := net.Dial("tcp", host+":"+pingPort)
+				if err != nil {
+					errStr := err.Error()
+					if !strings.Contains(errStr, "connection refused") {
+						fmt.Println("net.Dial error: " + errStr)
+						sig <- os.Interrupt
+					}
 				}
+				time.Sleep(time.Duration(duration) * time.Millisecond)
 			}
-			time.Sleep(1 * time.Second)
-		}
-	}()
+		}()
+	}
 
 	perfMap.Start()
 	<-sig
 	perfMap.Stop()
+
+	times := len(timeList)
+
+	var sumTimeMs float64
+	for _, timeMs := range timeList {
+		sumTimeMs += timeMs
+	}
+
+	fmt.Printf("\n\ntcp RST from %s: average time=%.3f ms\n", host, sumTimeMs/float64(times))
+}
+
+func cmdLineInit() {
+	flag.BoolVar(&help, "h", false, "Show help")
+	flag.BoolVar(&silent, "s", false, "Do not show information of each ping")
+	flag.IntVar(&duration, "d", 1000, "Ping `duration` ms")
+	flag.IntVar(&connections, "c", 1, "`Number` connections to keep ping")
+
+	flag.Usage = usage
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, "ping version: 0.0.1\nUsage: ping 172.217.194.106 [-d 500] [-c 100] [-s]\n\nOptions:\n")
+	flag.PrintDefaults()
 }
