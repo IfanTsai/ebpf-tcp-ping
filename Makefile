@@ -3,7 +3,7 @@
 CLANG ?= clang
 LLC   ?= llc
 NIC   ?= eth0
-XDP_OBJ ?= xdp_ping
+XDP_OBJ := xdp_ping.o
 XDP_SEC ?= xdp-ping
 
 INCLUDES ?= -I./include -I./lib -I./
@@ -13,8 +13,8 @@ LLC_FLAGS ?= -march=bpf -mcpu=probe -mattr=dwarfris -filetype=obj
 
 all: $(XDP_OBJ)
 
-$(XDP_OBJ): $(XDP_OBJ).ll
-	$(LLC) $(LLC_FLAGS) -o $@.o $^
+$(XDP_OBJ): %.o: %.ll
+	$(LLC) $(LLC_FLAGS) -o $@ $^
 
 %.ll: %.c
 	$(CLANG) $(INCLUDES) $(CLANG_FLAGS) -c $^ -o $@
@@ -23,8 +23,7 @@ clean:
 	-rm -rf *.ll *.o
 
 install: $(XDP_OBJ)
-	sudo ip link set dev $(NIC) xdpgeneric off
-	sudo ip link set dev $(NIC) xdpgeneric obj $^.o sec $(XDP_SEC)
+	sudo ip -force link set dev $(NIC) xdpgeneric obj $^ sec $(XDP_SEC)
 
 uninstall:
 	sudo ip link set dev $(NIC) xdpgeneric off

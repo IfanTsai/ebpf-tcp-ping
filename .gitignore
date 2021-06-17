@@ -52,8 +52,8 @@ Mkfile.old
 dkms.conf
 !go.mod
 
-.ll
+*.ll
 cscope*
-ctags
+tags
 
 ping

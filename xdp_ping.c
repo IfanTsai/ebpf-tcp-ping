@@ -16,6 +16,7 @@
 #define PING_PORT           65532
 
 #define ETH_HLEN            __ETH_HLEN
+
 #define IP_HLEN             sizeof(struct iphdr)
 #define TCP_CSUM_OFFSET     (ETH_HLEN + IP_HLEN + offsetof(struct tcphdr, check))
 #define ACK_SEQ_OFFSET      (ETH_HLEN + IP_HLEN + offsetof(struct tcphdr, ack_seq))
@@ -27,6 +28,11 @@
     const char ____fmt[] = fmt;                                \
     trace_printk(____fmt, sizeof(____fmt), ##__VA_ARGS__);     \
 })
+
+struct vlanhdr {
+    __be16 h_vlan_TCI;
+    __be16 h_vlan_encapsulated_proto;
+};
 
 static inline void swap_mac(struct ethhdr *eth)
 {
@@ -59,20 +65,39 @@ __section("xdp-ping")
 int xdp_ping(struct xdp_md *ctx)
 {
     int ret = 0;
-    void* data_end = (void*)(long)ctx->data_end;
-    void* data = (void*)(long)ctx->data;
+    void *data_end = (void *)(long)ctx->data_end;
+    void *data = (void *)(long)ctx->data;
 
     /* eth */
     struct ethhdr *eth = data;
-    if (unlikely(data + sizeof(*eth) > data_end))
+    __u64 nh_off = sizeof(*eth);
+    if (unlikely(data + nh_off > data_end))
         return XDP_DROP;
 
-    /* ipv4 */
     __be16 h_proto = eth->h_proto;
-    if (ETH_P_IP != bpf_ntohs(h_proto))
+
+    /* vlan */
+    __u64 vlanhdr_len = 0;
+    // handle double tags in ethernet frames
+    #pragma unroll
+    for (int i = 0; i < 2; i++) {
+        if (bpf_htons(ETH_P_8021Q) == h_proto || bpf_htons(ETH_P_8021AD) == h_proto) {
+            struct vlanhdr *vhdr = data + nh_off;
+
+            nh_off += sizeof(*vhdr);
+            if (data + nh_off > data_end)
+                return XDP_DROP;
+
+            vlanhdr_len += sizeof(*vhdr);
+            h_proto = vhdr->h_vlan_encapsulated_proto;
+        }
+    }
+
+    /* ipv4 */
+    if (bpf_htons(ETH_P_IP) != h_proto)
         return XDP_PASS;
 
-    struct iphdr *ip = data + sizeof(*eth);
+    struct iphdr *ip = data + nh_off;
     if (unlikely((void *)ip + sizeof(*ip) > data_end))
         return XDP_DROP;
 
@@ -104,33 +129,25 @@ int xdp_ping(struct xdp_md *ctx)
     /* set ack bit */
     new_tcp_flag |= TCP_FLAG_ACK;
 
-    ret = l4_csum_replace(ctx, TCP_CSUM_OFFSET, old_tcp_flag, new_tcp_flag, 0);
+    ret = l4_csum_replace(ctx, TCP_CSUM_OFFSET + vlanhdr_len, old_tcp_flag, new_tcp_flag, 0);
     if (unlikely(ret)) {
         bpf_printk("l4_csum_replace tcp_flag error\n");
         return XDP_DROP;
     }
 
-    ret = ctx_store_bytes(ctx, TCP_FLAG_OFFSET, &new_tcp_flag, sizeof(new_tcp_flag), 0);
-    if (unlikely(ret)) {
-        bpf_printk("ctx_store_bytes tcp_flag error\n");
-        return XDP_DROP;
-    }
+    memcpy(data + TCP_FLAG_OFFSET + vlanhdr_len, &new_tcp_flag, sizeof(new_tcp_flag));
 
     /* calculate and set ack sequence */
     __be32 old_ack_seq = tcp->ack_seq;
     __be32 new_ack_seq = bpf_htonl(bpf_ntohl(tcp->seq) + 1);
 
-    ret = l4_csum_replace(ctx, TCP_CSUM_OFFSET, old_ack_seq, new_ack_seq, 0);
+    ret = l4_csum_replace(ctx, TCP_CSUM_OFFSET + vlanhdr_len, old_ack_seq, new_ack_seq, 0);
     if (unlikely(ret)) {
         bpf_printk("l4_csum_replace ack_seq error\n");
         return XDP_DROP;
     }
 
-    ret = ctx_store_bytes(ctx, ACK_SEQ_OFFSET, &new_ack_seq, sizeof(new_ack_seq), 0);
-    if (unlikely(ret)) {
-        bpf_printk("ctx_store_bytes ack_seq error\n");
-        return XDP_DROP;
-    }
+    memcpy(data + ACK_SEQ_OFFSET + vlanhdr_len, &new_ack_seq, sizeof(new_ack_seq));
 
     return XDP_TX;
 }
