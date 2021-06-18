@@ -98,6 +98,20 @@ func loadKporbe(m *bpf.Module, name string) {
 	}
 }
 
+func cmdLineInit() {
+	flag.BoolVar(&help, "h", false, "Show help")
+	flag.BoolVar(&silent, "s", false, "Do not show information of each ping")
+	flag.IntVar(&duration, "d", 1000, "Ping `duration` ms")
+	flag.IntVar(&connections, "c", 1, "`Number` connections to keep ping")
+
+	flag.Usage = usage
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, "ping version: 0.0.1\nUsage: ping 172.217.194.106 [-d 500] [-c 100] [-s]\n\nOptions:\n")
+	flag.PrintDefaults()
+}
+
 func main() {
 	cmdLineInit()
 
@@ -108,6 +122,7 @@ func main() {
 
 	host := os.Args[1]
 
+	os.Args = os.Args[1:]
 	flag.Parse()
 
 	if help || host == "" {
@@ -160,16 +175,28 @@ func main() {
 
 	for i := 0; i < connections; i++ {
 		go func() {
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, os.Kill)
+
+			ticker := time.NewTicker(time.Duration(duration) * time.Millisecond)
+			defer ticker.Stop()
+
 			for {
-				_, err := net.Dial("tcp", host+":"+pingPort)
-				if err != nil {
-					errStr := err.Error()
-					if !strings.Contains(errStr, "connection refused") {
-						fmt.Println("net.Dial error: " + errStr)
-						sig <- os.Interrupt
+				select {
+				case <-sig:
+					return
+				case <-ticker.C:
+					_, err := net.Dial("tcp", host+":"+pingPort)
+					if err != nil {
+						errStr := err.Error()
+						if !strings.Contains(errStr, "connection refused") {
+							fmt.Println("net.Dial error: " + errStr)
+							sig <- os.Interrupt
+						}
+
 					}
+
 				}
-				time.Sleep(time.Duration(duration) * time.Millisecond)
 			}
 		}()
 	}
@@ -186,18 +213,4 @@ func main() {
 	}
 
 	fmt.Printf("\n\ntcp RST from %s: average time=%.3f ms\n", host, sumTimeMs/float64(times))
-}
-
-func cmdLineInit() {
-	flag.BoolVar(&help, "h", false, "Show help")
-	flag.BoolVar(&silent, "s", false, "Do not show information of each ping")
-	flag.IntVar(&duration, "d", 1000, "Ping `duration` ms")
-	flag.IntVar(&connections, "c", 1, "`Number` connections to keep ping")
-
-	flag.Usage = usage
-}
-
-func usage() {
-	fmt.Fprintf(os.Stderr, "ping version: 0.0.1\nUsage: ping 172.217.194.106 [-d 500] [-c 100] [-s]\n\nOptions:\n")
-	flag.PrintDefaults()
 }
