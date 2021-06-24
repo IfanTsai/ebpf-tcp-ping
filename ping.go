@@ -8,7 +8,9 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	bpf "github.com/iovisor/gobpf/bcc"
@@ -22,7 +24,7 @@ var (
 	connections int
 )
 
-const pingPort = "65532"
+const pingPort = 65532
 
 const source string = `
 #include <uapi/linux/ptrace.h>
@@ -132,7 +134,7 @@ func main() {
 
 	m := bpf.NewModule(source, []string{
 		"-w",
-		"-DPINGPORT=" + pingPort,
+		"-DPINGPORT=" + strconv.Itoa(pingPort),
 	})
 
 	defer m.Close()
@@ -153,49 +155,64 @@ func main() {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, os.Kill)
 
+	closed := make(chan struct{})
+	done := make(chan struct{})
+
 	var timeList []float64
 	go func() {
 		var event pingEventType
 		for {
-			data := <-pingEventCh
-			err := binary.Read(bytes.NewBuffer(data), binary.LittleEndian, &event)
-			if err != nil {
-				fmt.Printf("failed to decode received data: %s\n", err)
-				continue
-			}
+			select {
+			case <-closed:
+				close(done)
+				return
+			case data := <-pingEventCh:
+				err := binary.Read(bytes.NewBuffer(data), binary.LittleEndian, &event)
+				if err != nil {
+					fmt.Printf("failed to decode received data: %s\n", err.Error())
+					continue
+				}
 
-			deltaMs := float64(event.DeltaUs) / 1000.0
-			timeList = append(timeList, deltaMs)
+				deltaMs := float64(event.DeltaUs) / 1000.0
+				timeList = append(timeList, deltaMs)
 
-			if !silent {
-				fmt.Printf("tcp RST from %s: time=%.3f ms\n", host, deltaMs)
+				if !silent {
+					fmt.Printf("tcp RST from %s: time=%.3f ms\n", host, deltaMs)
+				}
+
 			}
 		}
 	}()
 
 	for i := 0; i < connections; i++ {
 		go func() {
-			sig := make(chan os.Signal, 1)
-			signal.Notify(sig, os.Interrupt, os.Kill)
-
 			ticker := time.NewTicker(time.Duration(duration) * time.Millisecond)
 			defer ticker.Stop()
 
+			fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+			if err != nil {
+				fmt.Printf("failed to create socket: %s\n", err.Error())
+				sig <- os.Interrupt
+				return
+			}
+			defer syscall.Close(fd)
+
+			saddr := &syscall.SockaddrInet4{Port: pingPort}
+			copy(saddr.Addr[:], net.ParseIP(host).To4())
+
 			for {
 				select {
-				case <-sig:
+				case <-closed:
 					return
 				case <-ticker.C:
-					_, err := net.Dial("tcp", host+":"+pingPort)
+					err = syscall.Connect(fd, saddr)
 					if err != nil {
 						errStr := err.Error()
 						if !strings.Contains(errStr, "connection refused") {
-							fmt.Println("net.Dial error: " + errStr)
+							fmt.Printf("failed to call connect: %s\n", err.Error())
 							sig <- os.Interrupt
 						}
-
 					}
-
 				}
 			}
 		}()
@@ -204,6 +221,9 @@ func main() {
 	perfMap.Start()
 	<-sig
 	perfMap.Stop()
+
+	close(closed)
+	<-done
 
 	times := len(timeList)
 
