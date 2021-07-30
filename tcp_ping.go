@@ -47,6 +47,10 @@ BPF_PERF_OUTPUT(ping_events);
 
 int kprobe__tcp_v4_connect(struct pt_regs *ctx, struct sock *skp)
 {
+	u64 pid = bpf_get_current_pid_tgid() >> 32;
+	if (pid != PID)
+		return 0;
+
     tcp_start_info_t info;
     info.ts_ns = bpf_ktime_get_ns();
     tcp_start_infos.update(&skp, &info);
@@ -54,7 +58,7 @@ int kprobe__tcp_v4_connect(struct pt_regs *ctx, struct sock *skp)
     return 0;
 };
 
-int kprobe__tcp_reset(struct pt_regs *ctx, struct sock *sk)
+int kprobe__tcp_rcv_state_process(struct pt_regs *ctx, struct sock *sk, struct sk_buff *skb)
 {
     tcp_start_info_t *info = tcp_start_infos.lookup(&sk);
     if (unlikely(!info))
@@ -62,6 +66,11 @@ int kprobe__tcp_reset(struct pt_regs *ctx, struct sock *sk)
 
     u16 family = sk->__sk_common.skc_family;
     u16 dport = bpf_ntohs(sk->__sk_common.skc_dport);
+
+	struct tcphdr *tcp = (struct tcphdr *)(skb->head + skb->transport_header);
+	u8 tcpflags = ((u8 *)tcp)[13];
+	if (tcpflags & TCP_FLAG_RST != 1)
+		goto exit;
 
     if (likely(AF_INET == family && PINGPORT == dport)) {
         u64 daddr = bpf_ntohl(sk->__sk_common.skc_daddr);
@@ -76,6 +85,7 @@ int kprobe__tcp_reset(struct pt_regs *ctx, struct sock *sk)
         ping_events.perf_submit(ctx, &rtt, sizeof(rtt));
     }
 
+exit:
     tcp_start_infos.delete(&sk);
 
     return 0;
@@ -135,12 +145,13 @@ func main() {
 	m := bpf.NewModule(source, []string{
 		"-w",
 		"-DPINGPORT=" + strconv.Itoa(pingPort),
+		"-DPID=" + strconv.Itoa(os.Getpid()),
 	})
 
 	defer m.Close()
 
 	loadKporbe(m, "tcp_v4_connect")
-	loadKporbe(m, "tcp_reset")
+	loadKporbe(m, "tcp_rcv_state_process")
 
 	pingEvent := bpf.NewTable(m.TableId("ping_events"), m)
 	pingEventCh := make(chan []byte)
