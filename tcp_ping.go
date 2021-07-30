@@ -120,7 +120,7 @@ func cmdLineInit() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "ping version: 0.0.1\nUsage: ping 172.217.194.106 [-d 500] [-c 100] [-s]\n\nOptions:\n")
+	fmt.Fprintf(os.Stderr, "tcp_ping version: 0.0.1\nUsage: tcp_ping 172.217.194.106 [-d 500] [-c 100] [-s]\n\nOptions:\n")
 	flag.PrintDefaults()
 }
 
@@ -133,6 +133,10 @@ func main() {
 	}
 
 	host := os.Args[1]
+	if net.ParseIP(host) == nil {
+		flag.Usage()
+		return
+	}
 
 	os.Args = os.Args[1:]
 	flag.Parse()
