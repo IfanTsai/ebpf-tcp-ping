@@ -34,12 +34,12 @@ const source string = `
 #include <linux/inet.h>
 
 typedef struct {
-    u64 ts_ns;
+	u64 ts_ns;
 } tcp_start_info_t;
 
 typedef struct {
-    u64 daddr;
-    u64 delta_us;
+	u64 daddr;
+	u64 delta_us;
 } rtt_t;
 
 BPF_HASH(tcp_start_infos, struct sock *, tcp_start_info_t);
@@ -51,44 +51,44 @@ int kprobe__tcp_v4_connect(struct pt_regs *ctx, struct sock *skp)
 	if (pid != PID)
 		return 0;
 
-    tcp_start_info_t info;
-    info.ts_ns = bpf_ktime_get_ns();
-    tcp_start_infos.update(&skp, &info);
+	tcp_start_info_t info;
+	info.ts_ns = bpf_ktime_get_ns();
+	tcp_start_infos.update(&skp, &info);
 
-    return 0;
+	return 0;
 };
 
 int kprobe__tcp_rcv_state_process(struct pt_regs *ctx, struct sock *sk, struct sk_buff *skb)
 {
-    tcp_start_info_t *info = tcp_start_infos.lookup(&sk);
-    if (unlikely(!info))
-        return 0;
+	tcp_start_info_t *info = tcp_start_infos.lookup(&sk);
+	if (unlikely(!info))
+		return 0;
 
-    u16 family = sk->__sk_common.skc_family;
-    u16 dport = bpf_ntohs(sk->__sk_common.skc_dport);
+	u16 family = sk->__sk_common.skc_family;
+	u16 dport = bpf_ntohs(sk->__sk_common.skc_dport);
 
 	struct tcphdr *tcp = (struct tcphdr *)(skb->head + skb->transport_header);
-	u8 tcpflags = ((u8 *)tcp)[13];
-	if (tcpflags & TCP_FLAG_RST != 1)
+	u16 tcpflags = *(u16 *)((u8 *)tcp + 12);
+	if (!(tcpflags & TCP_FLAG_RST))
 		goto exit;
 
-    if (likely(AF_INET == family && PINGPORT == dport)) {
-        u64 daddr = bpf_ntohl(sk->__sk_common.skc_daddr);
-        u64 ts = info->ts_ns;
-        u64 now = bpf_ktime_get_ns();
-        u64 delta_us = (now - ts) / 1000ul;
+	if (likely(AF_INET == family && PINGPORT == dport)) {
+		u64 daddr = bpf_ntohl(sk->__sk_common.skc_daddr);
+		u64 ts = info->ts_ns;
+		u64 now = bpf_ktime_get_ns();
+		u64 delta_us = (now - ts) / 1000ul;
 
-        rtt_t rtt;
-        rtt.daddr = daddr;
-        rtt.delta_us = delta_us;
+		rtt_t rtt;
+		rtt.daddr = daddr;
+		rtt.delta_us = delta_us;
 
-        ping_events.perf_submit(ctx, &rtt, sizeof(rtt));
-    }
+		ping_events.perf_submit(ctx, &rtt, sizeof(rtt));
+	}
 
 exit:
-    tcp_start_infos.delete(&sk);
+	tcp_start_infos.delete(&sk);
 
-    return 0;
+	return 0;
 }
 `
 
